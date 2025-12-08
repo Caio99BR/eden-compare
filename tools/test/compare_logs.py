@@ -4,176 +4,181 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import sys
-import pandas as pd
-import matplotlib.pyplot as plt
 import glob
 import os
 import colorsys
 
-# Check required Python modules
 required_modules = ["pandas", "matplotlib"]
-missing_modules = []
-
-for mod in required_modules:
-    try:
-        __import__(mod)
-    except ImportError:
-        missing_modules.append(mod)
-
+missing_modules = [m for m in required_modules if __import__("importlib.util").util.find_spec(m) is None]
 if missing_modules:
-    print(f"Error: Missing required Python modules: {', '.join(missing_modules)}")
-    print("Please install them, e.g.:")
-    print(f"    python3 -m pip install {' '.join(missing_modules)}")
+    print(f"[compare_logs.py] Error: Missing required Python modules: {', '.join(missing_modules)}")
+    print(f"[compare_logs.py] Please install with: python3 -m pip install {' '.join(missing_modules)}")
     sys.exit(1)
 
-# Get log folder from command-line argument
+import pandas as pd
+import matplotlib.pyplot as plt
+
+FILTER_PERCENT = "--filter-percent" in sys.argv
+FILTER_IQR = "--filter-iqr" in sys.argv
+
+if FILTER_PERCENT:
+    print("[compare_logs.py] Outlier filtering using 1% / 99% percent ENABLED")
+elif FILTER_IQR:
+    print("[compare_logs.py] Outlier filtering using IQR ENABLED")
+
 if len(sys.argv) < 2:
-    print("Usage: python3 compare_logs.py <log_folder>")
+    print("[compare_logs.py] Usage: python3 compare_logs.py <log_folder> [--filter-percent] [--filter-iqr]")
     sys.exit(1)
 
 log_base_folder = os.path.expanduser(sys.argv[1])
 if not os.path.isdir(log_base_folder):
-    print(f"Error: '{log_base_folder}' is not a valid folder")
+    print(f"[compare_logs.py] Error: '{log_base_folder}' is not a valid folder")
     sys.exit(1)
 
-# Find all CSV files recursively (ignore summary CSVs)
-csv_files = sorted(glob.glob(os.path.join(log_base_folder, "**/eden_*.csv"), recursive=True))
-csv_files = [f for f in csv_files if not f.endswith("_summary.csv")]
+metrics = [
+    ("fps", "FPS", True),
+    ("frametime", "Frame Time (ms)", False),
+    ("cpu_load", "CPU Load (%)", False),
+    ("gpu_load", "GPU Load (%)", False)
+]
 
-if not csv_files:
-    print(f"No CSV files found in {log_base_folder} or its subfolders")
-    sys.exit(0)
+def get_csv_files(game_folder):
+    files = sorted(glob.glob(os.path.join(game_folder, '**/eden_*.csv'), recursive=True))
+    return [f for f in files if not f.endswith('_summary.csv')]
 
-# Prepare plotting
-plt.figure(figsize=(14, 7))
+def read_data(file_path):
+    csv_dir = os.path.dirname(file_path)
 
-# Gather build folders
-build_folders = sorted({os.path.basename(os.path.dirname(os.path.dirname(f))) for f in csv_files})
-n_builds = len(build_folders)
+    version_file = os.path.join(csv_dir, "eden-cli-version.txt")
+    name_file = os.path.join(csv_dir, "eden-cli-game-name.txt")
+    id_file = os.path.join(csv_dir, "eden-cli-game-id.txt")
 
-# Generate base colors for each build folder (HSV evenly spaced)
-build_colors = {}
-for i, build in enumerate(build_folders):
-    h = i / n_builds  # hue evenly spaced
-    s = 0.7
-    v = 0.9
-    rgb = colorsys.hsv_to_rgb(h, s, v)
-    build_colors[build] = rgb
+    version_short = open(version_file).read().strip().split()[0] if os.path.exists(version_file) else "unknown"
+    game_name = open(name_file).read().strip() if os.path.exists(name_file) else os.path.basename(csv_dir)
+    game_id = open(id_file).read().strip() if os.path.exists(id_file) else "unknown"
 
-# Track how many CSVs plotted per build to adjust brightness
-build_counts = {b: 0 for b in build_folders}
+    relative_path = os.path.basename(csv_dir)
+    build_folder = os.path.basename(os.path.dirname(csv_dir))
 
-stats = []
-
-for csv_file in csv_files:
-    # Relative path from base folder
-    relative_path = os.path.relpath(csv_file, log_base_folder)
-
-    # Read eden-cli version if exists
-    log_dir = os.path.dirname(csv_file)
-    version_file = os.path.join(log_dir, "eden-cli-version.txt")
-    if os.path.exists(version_file):
-        with open(version_file, "r") as f:
-            eden_version = f.read().strip()
-    else:
-        eden_version = "unknown version"
-
-    # Corresponding summary file
-    summary_file = csv_file.replace(".csv", "_summary.csv")
-    
-    # Skip empty CSVs
-    if os.path.getsize(csv_file) == 0:
-        print(f"Skipping {relative_path}: file is empty")
-        continue
-
-    # Read main CSV (skip system info lines)
-    df = pd.read_csv(csv_file, skiprows=2)
+    df = pd.read_csv(file_path, skiprows=2)
     df.columns = df.columns.str.strip()
-    
-    if 'fps' not in df.columns:
-        print(f"Skipping {relative_path}: no 'fps' column found")
-        continue
+    summary_file = file_path.replace(".csv", "_summary.csv")
 
-    y = df['fps']
+    return {
+        "df": df,
+        "relative_path": relative_path,
+        "build_folder": build_folder,
+        "version_short": version_short,
+        "summary_file": summary_file,
+        "game_name": game_name,
+        "game_id": game_id
+    }
 
-    # --- FILTRAR OUTLIERS ---
-    mean_y = y.mean()
-    std_y = y.std()
-    y_filtered = y[(y >= mean_y - 3*std_y) & (y <= mean_y + 3*std_y)]
-    x_filtered = range(len(y_filtered))
-    # ------------------------
+def build_colors_for_builds(build_folders):
+    n = len(build_folders)
+    return {b: colorsys.hsv_to_rgb(i / n, 0.7, 0.9) for i, b in enumerate(build_folders)}
 
-    # Compute statistics from filtered data
-    mean_fps = y_filtered.mean()
-    min_fps = y_filtered.min()
-    max_fps = y_filtered.max()
+def plot_metric(df, column_name, build_colors, build_folder, relative_path, version_short,
+                summary_file=None, is_fps=False, ax=None):
+    if column_name not in df.columns:
+        return None
 
-    # Read summary CSV if exists
-    summary_text = ""
-    if os.path.exists(summary_file):
+    y = df[column_name]
+    if FILTER_PERCENT:
+        lower = y.quantile(0.01)
+        upper = y.quantile(0.99)
+        y = y.clip(lower=lower, upper=upper)
+    elif FILTER_IQR:
+        Q1 = y.quantile(0.25)
+        Q3 = y.quantile(0.75)
+        IQR = Q3 - Q1
+        lower = Q1 - 1.5 * IQR
+        upper = Q3 + 1.5 * IQR
+        y = y.clip(lower=lower, upper=upper)
+
+    x = range(len(y))
+    min_val = y.min()
+    max_val = y.max()
+    avg_val = y.mean()
+
+    summary_text = f"{relative_path:<11} | {version_short:<48} | AVG: {avg_val:>5.1f} | Min: {min_val:>5.1f} | Max: {max_val:>5.1f}"
+    if is_fps and summary_file and os.path.exists(summary_file):
         try:
             df_sum = pd.read_csv(summary_file)
-            avg = float(df_sum['Average FPS'][0])
-            p0_1 = float(df_sum['0.1% Min FPS'][0])
-            p1 = float(df_sum['1% Min FPS'][0])
-            p97 = float(df_sum['97% Percentile FPS'][0])
-            summary_text = f" | summary avg={avg:.1f}, 0.1%={p0_1:.1f}, 1%={p1:.1f}, 97%={p97:.1f}"
+            summary_text = (f"{relative_path:<11} | {version_short:<48} | "
+                            f"AVG: {float(df_sum['Average FPS'][0]):>5.1f} | "
+                            f"Min: {min_val:>5.1f} | Max: {max_val:>5.1f} | "
+                            f"0.1%: {float(df_sum['0.1% Min FPS'][0]):>5.1f} | "
+                            f"1%: {float(df_sum['1% Min FPS'][0]):>5.1f} | "
+                            f"97%: {float(df_sum['97% Percentile FPS'][0]):>5.1f}")
         except Exception as e:
-            print(f"Could not read summary for {summary_file}: {e}")
+            print(f"[compare_logs.py] Could not read summary for {summary_file}: {e}")
 
-    # Store stats including version
-    stats.append((relative_path, mean_fps, min_fps, max_fps, summary_text, eden_version))
+    ax.plot(x, y, label=summary_text, color=build_colors[build_folder])
+    return summary_text
 
-    # Determine build folder and assign color with slight variation
-    build_folder = os.path.basename(os.path.dirname(os.path.dirname(csv_file)))
-    base_rgb = build_colors[build_folder]
-    count = build_counts[build_folder]
-    # Slightly vary brightness (value) for multiple runs in same build
-    factor = 0.9 - 0.15 * count
-    rgb = tuple(min(max(c * factor, 0), 1) for c in base_rgb)
-    build_counts[build_folder] += 1
+def process_game_folder(game_folder):
+    csv_files = get_csv_files(game_folder)
+    if not csv_files:
+        print(f"[compare_logs.py] No CSV files in '{game_folder}', skipping...")
+        return
 
-    # Plot FPS line with filtered data
-    plt.plot(
-        x_filtered, y_filtered,
-        label=f"{relative_path} (avg={mean_fps:.1f}) [{eden_version}]{summary_text}",
-        color=rgb
-    )
+    data = [read_data(f) for f in csv_files]
 
-# Configure plot
-plt.xlabel('Frame')
-plt.ylabel('FPS')
-plt.title('FPS Comparison Across All Builds (Outliers Removed)')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
+    game_name = data[0]["game_name"]
+    game_id = data[0]["game_id"]
+    print(f"[compare_logs.py] Processing game '{game_name}' ({game_id})")
 
-# Save plot
-png_file = os.path.join(os.getcwd(), "fps_comparison_all_builds.png")
-plt.savefig(png_file, dpi=200)
-plt.show()
+    build_folders = sorted({d['build_folder'] for d in data})
+    build_colors = build_colors_for_builds(build_folders)
 
-# Print concise statistics grouped by build folder
-print("\nFPS Summary by build folder (concise):")
-for name, mean_fps, min_fps, max_fps, summary_text, eden_version in stats:
-    log_folder = os.path.dirname(name)
-    build_folder = os.path.basename(os.path.dirname(log_folder))
-    version_short = eden_version.split()[0] if eden_version != "unknown version" else "unknown"
-    print(f"{build_folder} | {version_short} | mean={mean_fps:.1f}, min={min_fps:.1f}, max={max_fps:.1f}")
+    png_suffix = "-filtered-percent" if FILTER_PERCENT else "-filtered-iqr" if FILTER_IQR else ""
+    title_filter_label = " (Filtered 1%/99% percent)" if FILTER_PERCENT else " (Filtered IQR)" if FILTER_IQR else ""
 
-print("\n----------------------------")
-print(f"Total CSV files processed: {len(stats)}")
+    for column_name, metric_label, is_fps in metrics:
+        plt.figure(figsize=(14, 7))
+        ax = plt.gca()
 
-# Track build folders (without timestamps)
-build_folders_paths = set()
-for csv_file in csv_files:
-    run_folder = os.path.dirname(csv_file)
-    build_folder = os.path.dirname(run_folder)
-    build_folders_paths.add(build_folder)
+        for d in data:
+            plot_metric(
+                d['df'], column_name, build_colors, d['build_folder'], d['relative_path'],
+                d['version_short'], summary_file=d['summary_file'] if is_fps else None,
+                is_fps=is_fps, ax=ax
+            )
 
-print("\nBuild folders containing CSVs:")
-for folder in sorted(build_folders_paths):
-    print(f" - {folder}")
+        plt.xlabel("Frame")
+        plt.ylabel(metric_label)
+        plt.title(f"{game_name} ({game_id}) - {metric_label} Comparison Across Builds{title_filter_label}")
+        plt.legend(fontsize=8)
+        plt.grid(True)
+        plt.tight_layout()
+        plots_dir = os.path.join(game_folder, "plots", column_name)
+        os.makedirs(plots_dir, exist_ok=True)
+        plt.savefig(os.path.join(plots_dir, f"comparison{png_suffix}.png"), dpi=200)
+        plt.close()
 
-print(f"Graph saved as: {png_file}")
+    fig, axs = plt.subplots(len(metrics), 1, figsize=(14, 4*len(metrics)), sharex=True)
+    for d in data:
+        for idx, (col, _, is_fps) in enumerate(metrics):
+            plot_metric(
+                d['df'], col, build_colors, d['build_folder'], d['relative_path'],
+                d['version_short'], summary_file=d['summary_file'] if is_fps else None,
+                is_fps=is_fps, ax=axs[idx]
+            )
 
+    axs[-1].set_xlabel("Frame")
+    for idx, (_, metric_label, _) in enumerate(metrics):
+        axs[idx].set_ylabel(metric_label)
+        axs[idx].grid(True)
+        axs[idx].legend(fontsize=8)
+
+    plt.suptitle(f"{game_name} ({game_id}) - Combined Metrics Comparison Across Builds{title_filter_label}")
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plots_dir = os.path.join(game_folder, "plots", "all_metrics")
+    os.makedirs(plots_dir, exist_ok=True)
+    plt.savefig(os.path.join(plots_dir, f"comparison{png_suffix}.png"), dpi=200)
+    plt.show()
+
+for game_folder in sorted(os.path.join(log_base_folder, d) for d in os.listdir(log_base_folder)
+                          if os.path.isdir(os.path.join(log_base_folder, d))):
+    process_game_folder(game_folder)
