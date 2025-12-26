@@ -119,7 +119,7 @@ for eden_bin in "${ALL_EXECUTABLES[@]}"; do
     fi
 
     # Clean shaders cache
-    rm -rf "$HOME/.local/share/eden/shader/*"
+    rm -rf "$HOME/.local/share/eden/shader/"
 
     # Extract build name
     base=$(basename "$eden_bin")
