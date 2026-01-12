@@ -85,8 +85,8 @@ def plot_metric(df, column_name, build_colors, build_folder, relative_path, vers
 
     y = df[column_name]
     if FILTER_PERCENT:
-        lower = y.quantile(0.01)
-        upper = y.quantile(0.99)
+        lower = y.quantile(0.001)
+        upper = y.quantile(0.999)
         y = y.clip(lower=lower, upper=upper)
     elif FILTER_IQR:
         Q1 = y.quantile(0.25)

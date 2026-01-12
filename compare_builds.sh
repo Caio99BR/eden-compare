@@ -26,8 +26,9 @@ TEMP_LOG_DIR=$(mktemp -d -t eden-logs-XXXXXX)
 # Cleanup old logs, preserving '_master' logs, unless forced
 if [[ -d "$BASE_LOG_DIR" ]] && [[ $(find "$BASE_LOG_DIR" -mindepth 1 -print -quit) ]]; then
     echo -n "[compare_build.sh] Clean old logs in '$BASE_LOG_DIR' (except *_master)? (y/n/f): "
-    read -n1 answer
+    #read -n1 answer
     echo
+    answer=f
     answer=$(echo "$answer" | tr '[:upper:]' '[:lower:]')
     if [[ "$answer" == "y" ]]; then
         echo "[compare_build.sh] Cleaning old logs (keeping *_master logs)..."
@@ -57,20 +58,35 @@ done
 
 # Log duration
 WAIT_DURATION=5
-LOG_DURATION=$((${PLAYTIME:-60} + WAIT_DURATION))
+LOG_DURATION=$((${PLAYTIME:-90} + WAIT_DURATION))
 
 # Detect all Eden executables
-EXECUTABLES=()
 echo "[compare_build.sh] Searching for executables..."
+
+# Sets to avoid duplicates
+declare -A EXECUTABLE_SET
+declare -A MASTER_EXECUTABLE_SET
+
+# Final ordered lists
+EXECUTABLES=()
+MASTER_EXECUTABLES=()
+
+add_unique_exec() {
+    local file="$1"
+
+    [[ -n "${EXECUTABLE_SET[$file]}" ]] && return 0
+    EXECUTABLE_SET["$file"]=1
+    EXECUTABLES+=("$file")
+}
 
 search_execs() {
     local dir="$1"
     [[ -d "$dir" ]] || return 0
 
     while IFS= read -r -d '' file; do
-        EXECUTABLES+=("$file")
+        add_unique_exec "$file"
     done < <(
-        find "$dir"/ -maxdepth 1 -type f \
+        find "$dir" -maxdepth 1 -type f \
             \( -name "*.exe" -o -name "*.AppImage" -o -name "eden*" -o -name "Eden*" \) \
             -print0 2>/dev/null
     )
@@ -78,20 +94,31 @@ search_execs() {
 
 # Search default build/bin and artifacts
 shopt -s nullglob
-for d in "$DEFAULT_BUILD_DIR"*/bin; do
+
+for d in "$DEFAULT_BUILD_DIR"*/bin "$DEFAULT_BUILD_DIR"*/build/bin; do
     search_execs "$d"
+    echo "$d"
 done
+
+for d in "$COMPARE_MASTER_BUILD_DIR"*/bin "$COMPARE_MASTER_BUILD_DIR"*/build/bin; do
+    search_execs "$d"
+    echo "$d"
+done
+
 shopt -u nullglob
+
 search_execs "$DEFAULT_EXECUTABLES_DIR"
 
-# Add master executables (kept separately)
-MASTER_EXECUTABLES=()
 if [[ -d "$DEFAULT_EXECUTABLES_DIR/master" ]]; then
     while IFS= read -r -d '' master_bin; do
+        [[ -n "${MASTER_EXECUTABLE_SET[$master_bin]}" ]] && continue
+
+        MASTER_EXECUTABLE_SET["$master_bin"]=1
         MASTER_EXECUTABLES+=("$master_bin")
     done < <(
         find "$DEFAULT_EXECUTABLES_DIR/master" -maxdepth 1 -type f \
-            \( -name "*.exe" -o -name "*.AppImage" -o -name "eden*" -o -name "Eden*" \) -print0
+            \( -name "*.exe" -o -name "*.AppImage" -o -name "eden*" -o -name "Eden*" \) \
+            -print0 2>/dev/null
     )
 fi
 
@@ -100,7 +127,9 @@ ALL_EXECUTABLES=("${EXECUTABLES[@]}" "${MASTER_EXECUTABLES[@]}")
 
 if [[ ${#ALL_EXECUTABLES[@]} -eq 0 ]]; then
     echo "[compare_build.sh] ERROR: No Eden executables found!"
-    echo "[compare_build.sh] Searched in: $DEFAULT_EXECUTABLES_DIR/, $DEFAULT_BUILD_DIR*/bin/"
+    echo "[compare_build.sh] Searched in:"
+    echo "  - $DEFAULT_EXECUTABLES_DIR/"
+    echo "  - $DEFAULT_BUILD_DIR*/bin/"
     exit 1
 fi
 
@@ -133,7 +162,7 @@ for eden_bin in "${ALL_EXECUTABLES[@]}"; do
     fi
 
     # If executable is in master folder, append "_master" to build_name
-    if [[ "$eden_bin" == *"/master/"* ]]; then
+    if [[ "$eden_bin" == *"master"* ]]; then
         build_name="${build_name}_master"
     fi
 
@@ -219,4 +248,8 @@ rm -rf "$TEMP_LOG_DIR/"*
 # Run comparison script
 echo "[compare_build.sh] All builds finished. Running compare_logs.py..."
 python3 ./tools/test/compare_logs.py "$BASE_LOG_DIR" --filter-percent
+python3 ./tools/test/compare_logs.py "$BASE_LOG_DIR"
 
+echo ""
+grep -F "Booting game:" "$HOME/.local/share/eden/log/eden_log.txt" | sed 's/.*Booting game: //'
+echo ""
